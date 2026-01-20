@@ -1,0 +1,23 @@
+{
+  "id": "drag-from-webcontent",
+  "name": "Drag from Web Content",
+  "description": "Allows dragging the browser window from the top portion of web content, similar to Arc Browser",
+  "scripts": {
+    "zen-drag-webcontent.uc.js": {
+      "include": [
+        "chrome://browser/content/browser.xhtml"
+      ]
+    }
+  },
+  "homepage": "https://github.com/zen-browser/desktop",
+  "author": "Bxth",
+  "version": "1.0.0",
+  "tags": [
+    "Zen Browser",
+    "Window Dragging",
+    "UX Enhancement"
+  ],
+  "createdAt": "2026-01-20",
+  "updatedAt": "2026-01-20",
+  "fork": ["zen"]
+}

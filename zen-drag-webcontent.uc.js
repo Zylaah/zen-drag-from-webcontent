@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name           Drag from Web Content
 // @description    Allows dragging the browser window from the top portion of web content
-// @author         Zen Community
+// @author         Bxth
 // @version        1.0.0
-// @namespace      https://github.com/zen-browser/desktop
+// @namespace      https://github.com/Zylaah/zen-drag-from-webcontent
 // ==/UserScript==
 
 /* eslint-env es6, browser */
@@ -19,18 +19,18 @@
   const PREF_DISABLE_FULLSCREEN = 'zen.dragwebcontent.disable-in-fullscreen';
 
   // Interactive elements that should NOT trigger window dragging
-  const INTERACTIVE_ELEMENTS = new Set([
+  const INTERACTIVE_SELECTORS = [
     'a', 'button', 'input', 'textarea', 'select', 'label',
-    'video', 'audio', 'canvas', 'iframe', 'object', 'embed'
-  ]);
+    'video', 'audio', 'canvas', 'iframe', 'object', 'embed',
+    '[contenteditable="true"]', '[onclick]', '[role="button"]',
+    '[role="link"]', '[role="menuitem"]', '[role="tab"]',
+    '[role="checkbox"]', '[role="radio"]', '[role="slider"]',
+    '[role="spinbutton"]', '[role="textbox"]', '[role="searchbox"]',
+    '[role="switch"]'
+  ].join(',');
 
-  // Interactive roles that should NOT trigger window dragging
-  const INTERACTIVE_ROLES = new Set([
-    'button', 'link', 'menuitem', 'tab', 'checkbox', 'radio',
-    'slider', 'spinbutton', 'textbox', 'searchbox', 'switch'
-  ]);
-
-  // State
+  // Track overlays per browser
+  const overlayMap = new WeakMap();
   let dragState = null;
 
   // Wait for the window to be ready
@@ -43,277 +43,337 @@
   function init() {
     console.log('[DragFromWebContent] Initializing');
 
-    // Add event listeners to each browser as tabs are created/selected
-    setupBrowserListeners();
+    // Setup overlays for existing browsers
+    updateAllBrowsers();
 
     // Listen for tab events
     gBrowser.tabContainer.addEventListener('TabOpen', handleTabEvent);
     gBrowser.tabContainer.addEventListener('TabSelect', handleTabEvent);
 
+    // Listen for preference changes
+    Services.prefs.addObserver('zen.dragwebcontent.', handlePrefChange);
+
+    // Listen for fullscreen changes
+    window.addEventListener('fullscreen', updateAllBrowsers);
+    window.addEventListener('sizemodechange', updateAllBrowsers);
+
     // Cleanup on window unload
     window.addEventListener('unload', cleanup, { once: true });
   }
 
-  function setupBrowserListeners() {
-    const browsers = document.querySelectorAll('browser[type="content"]');
-    browsers.forEach(browser => {
-      attachBrowserListeners(browser);
-    });
+  function handlePrefChange() {
+    updateAllBrowsers();
   }
 
   function handleTabEvent(event) {
     setTimeout(() => {
       const browser = gBrowser.getBrowserForTab(event.target);
       if (browser) {
-        attachBrowserListeners(browser);
+        addOverlayToBrowser(browser);
       }
     }, 100);
   }
 
-  function attachBrowserListeners(browser) {
-    if (!browser || browser._zenDragListenersAttached) {
+  function updateAllBrowsers() {
+    const browsers = document.querySelectorAll('browser[type="content"]');
+    browsers.forEach(browser => {
+      addOverlayToBrowser(browser);
+    });
+  }
+
+  function addOverlayToBrowser(browser) {
+    if (!browser) return;
+
+    // Check if enabled
+    const enabled = Services.prefs.getBoolPref(PREF_ENABLED, true);
+    if (!enabled) {
+      removeOverlayFromBrowser(browser);
       return;
     }
 
-    try {
-      // Mark as attached to avoid duplicates
-      browser._zenDragListenersAttached = true;
+    // Check if in fullscreen and should disable
+    const disableInFullscreen = Services.prefs.getBoolPref(PREF_DISABLE_FULLSCREEN, true);
+    if (disableInFullscreen && window.fullScreen) {
+      removeOverlayFromBrowser(browser);
+      return;
+    }
 
-      // We need to add listeners to the content window
-      // Use a message manager approach for e10s compatibility
-      if (browser.messageManager) {
-        injectContentScript(browser);
-      }
-    } catch (e) {
-      console.error('[DragFromWebContent] Error attaching listeners:', e);
+    // Get or create overlay
+    let overlay = overlayMap.get(browser);
+    
+    if (!overlay) {
+      overlay = createOverlay(browser);
+      overlayMap.set(browser, overlay);
+    }
+
+    // Update overlay properties
+    updateOverlay(overlay);
+  }
+
+  function removeOverlayFromBrowser(browser) {
+    const overlay = overlayMap.get(browser);
+    if (overlay && overlay.parentNode) {
+      overlay.remove();
+      overlayMap.delete(browser);
     }
   }
 
-  function injectContentScript(browser) {
-    // Inject a frame script that will handle content-side events
-    const frameScript = `
-      (function() {
-        const INTERACTIVE_ELEMENTS = new Set([
-          'a', 'button', 'input', 'textarea', 'select', 'label',
-          'video', 'audio', 'canvas', 'iframe', 'object', 'embed'
-        ]);
+  function createOverlay(browser) {
+    console.log('[DragFromWebContent] Creating overlay for browser');
 
-        const INTERACTIVE_ROLES = new Set([
-          'button', 'link', 'menuitem', 'tab', 'checkbox', 'radio',
-          'slider', 'spinbutton', 'textbox', 'searchbox', 'switch'
-        ]);
+    // Find the browser's container
+    const browserContainer = browser.closest('.browserContainer') || browser.parentNode;
+    if (!browserContainer) {
+      console.error('[DragFromWebContent] Could not find browser container');
+      return null;
+    }
 
-        let dragStartPos = null;
-
-        function isInteractiveElement(element) {
-          if (!element || element === document.documentElement || element === document.body) {
-            return false;
-          }
-
-          // Check element tag
-          const tagName = element.tagName?.toLowerCase();
-          if (INTERACTIVE_ELEMENTS.has(tagName)) {
-            return true;
-          }
-
-          // Check role attribute
-          const role = element.getAttribute('role');
-          if (role && INTERACTIVE_ROLES.has(role)) {
-            return true;
-          }
-
-          // Check if element has click handlers or is contenteditable
-          if (element.onclick || element.hasAttribute('onclick')) {
-            return true;
-          }
-
-          if (element.isContentEditable) {
-            return true;
-          }
-
-          // Check if element has cursor pointer (usually clickable)
-          const computedStyle = content.getComputedStyle(element);
-          if (computedStyle.cursor === 'pointer') {
-            return true;
-          }
-
-          // Check parent elements (up to 3 levels)
-          let parent = element.parentElement;
-          let depth = 0;
-          while (parent && depth < 3) {
-            const parentTag = parent.tagName?.toLowerCase();
-            if (INTERACTIVE_ELEMENTS.has(parentTag)) {
-              return true;
-            }
-            const parentRole = parent.getAttribute('role');
-            if (parentRole && INTERACTIVE_ROLES.has(parentRole)) {
-              return true;
-            }
-            parent = parent.parentElement;
-            depth++;
-          }
-
-          return false;
-        }
-
-        function handleMouseDown(event) {
-          // Only handle left mouse button
-          if (event.button !== 0) {
-            return;
-          }
-
-          // Get preferences from parent
-          sendAsyncMessage('ZenDragWebContent:GetPrefs', {});
-          
-          addMessageListener('ZenDragWebContent:Prefs', function onPrefs(msg) {
-            removeMessageListener('ZenDragWebContent:Prefs', onPrefs);
-            
-            const { enabled, height, threshold, disableInFullscreen } = msg.data;
-
-            if (!enabled) {
-              return;
-            }
-
-            // Check if in fullscreen
-            if (disableInFullscreen && content.fullScreen) {
-              return;
-            }
-
-            // Check if click is in the top draggable area
-            const clickY = event.clientY;
-            if (clickY > height) {
-              return;
-            }
-
-            // Check if clicking on an interactive element
-            if (isInteractiveElement(event.target)) {
-              return;
-            }
-
-            // Store initial position for threshold check
-            dragStartPos = {
-              x: event.screenX,
-              y: event.screenY,
-              threshold: threshold
-            };
-
-            // Add temporary listeners for movement and release
-            content.addEventListener('mousemove', handleMouseMove, true);
-            content.addEventListener('mouseup', handleMouseUp, true);
-          });
-        }
-
-        function handleMouseMove(event) {
-          if (!dragStartPos) {
-            return;
-          }
-
-          const deltaX = Math.abs(event.screenX - dragStartPos.x);
-          const deltaY = Math.abs(event.screenY - dragStartPos.y);
-          const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
-
-          // Check if movement exceeds threshold
-          if (distance >= dragStartPos.threshold) {
-            // Threshold exceeded, initiate window drag
-            event.preventDefault();
-            event.stopPropagation();
-
-            sendAsyncMessage('ZenDragWebContent:StartDrag', {
-              screenX: event.screenX,
-              screenY: event.screenY
-            });
-
-            // Clean up
-            cleanup();
-          }
-        }
-
-        function handleMouseUp(event) {
-          // Mouse released before threshold, don't drag
-          cleanup();
-        }
-
-        function cleanup() {
-          dragStartPos = null;
-          content.removeEventListener('mousemove', handleMouseMove, true);
-          content.removeEventListener('mouseup', handleMouseUp, true);
-        }
-
-        // Add main mousedown listener
-        content.addEventListener('mousedown', handleMouseDown, true);
-
-      })();
+    // Create overlay element
+    const overlay = document.createElement('div');
+    overlay.className = 'zen-drag-webcontent-overlay';
+    
+    // Style the overlay
+    overlay.style.cssText = `
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 999999;
+      background: transparent;
+      pointer-events: auto;
+      cursor: grab;
     `;
 
+    // Add event listener
+    overlay.addEventListener('mousedown', (e) => handleOverlayMouseDown(e, browser, overlay));
+
+    // Ensure container has position: relative
+    const containerStyle = window.getComputedStyle(browserContainer);
+    if (containerStyle.position === 'static') {
+      browserContainer.style.position = 'relative';
+    }
+
+    // Insert overlay
+    browserContainer.appendChild(overlay);
+
+    return overlay;
+  }
+
+  function updateOverlay(overlay) {
+    if (!overlay) return;
+
+    const height = Services.prefs.getIntPref(PREF_HEIGHT, 60);
+    overlay.style.height = `${height}px`;
+  }
+
+  function handleOverlayMouseDown(event, browser, overlay) {
+    // Only handle left mouse button
+    if (event.button !== 0) return;
+
+    console.log('[DragFromWebContent] Overlay mousedown');
+
+    // Get the threshold
+    const threshold = Services.prefs.getIntPref(PREF_THRESHOLD, 5);
+
+    // Check what element is underneath the overlay at this position
+    const elementUnderneath = getElementUnderOverlay(browser, event.clientX, event.clientY);
+    
+    if (!elementUnderneath) {
+      console.log('[DragFromWebContent] No element underneath, starting drag');
+      startDragWithThreshold(event, overlay, threshold);
+      return;
+    }
+
+    // Check if element is interactive
+    if (isInteractiveElement(elementUnderneath)) {
+      console.log('[DragFromWebContent] Interactive element detected, passing through');
+      passEventToElement(event, elementUnderneath, overlay);
+      return;
+    }
+
+    // Not interactive, start drag with threshold
+    console.log('[DragFromWebContent] Non-interactive element, starting drag');
+    startDragWithThreshold(event, overlay, threshold);
+  }
+
+  function getElementUnderOverlay(browser, clientX, clientY) {
     try {
-      // Load the frame script
-      browser.messageManager.loadFrameScript(
-        'data:application/javascript;charset=utf-8,' + encodeURIComponent(frameScript),
-        false
-      );
+      // Get the browser's content window
+      const contentWindow = browser.contentWindow;
+      if (!contentWindow) return null;
 
-      // Listen for messages from content
-      browser.messageManager.addMessageListener('ZenDragWebContent:GetPrefs', (msg) => {
-        const enabled = Services.prefs.getBoolPref(PREF_ENABLED, true);
-        const height = Services.prefs.getIntPref(PREF_HEIGHT, 60);
-        const threshold = Services.prefs.getIntPref(PREF_THRESHOLD, 5);
-        const disableInFullscreen = Services.prefs.getBoolPref(PREF_DISABLE_FULLSCREEN, true);
+      // Convert client coordinates to content coordinates
+      const rect = browser.getBoundingClientRect();
+      const x = clientX - rect.left;
+      const y = clientY - rect.top;
 
-        browser.messageManager.sendAsyncMessage('ZenDragWebContent:Prefs', {
-          enabled,
-          height,
-          threshold,
-          disableInFullscreen
-        });
-      });
+      // Get element at position in content
+      const element = contentWindow.document.elementFromPoint(x, y);
+      
+      console.log('[DragFromWebContent] Element at point:', element?.tagName, element?.className);
+      return element;
+    } catch (e) {
+      console.error('[DragFromWebContent] Error getting element at point:', e);
+      return null;
+    }
+  }
 
-      browser.messageManager.addMessageListener('ZenDragWebContent:StartDrag', (msg) => {
-        // Initiate window drag from chrome
-        try {
-          const { screenX, screenY } = msg.data;
-          
-          // Create a synthetic mouse event to trigger window drag
-          const mouseEvent = new MouseEvent('mousedown', {
-            screenX: screenX,
-            screenY: screenY,
-            clientX: screenX,
-            clientY: screenY,
-            button: 0,
-            buttons: 1,
-            bubbles: true,
-            cancelable: true
-          });
+  function isInteractiveElement(element) {
+    if (!element || element === element.ownerDocument.documentElement || 
+        element === element.ownerDocument.body) {
+      return false;
+    }
 
-          // Use window drag API
-          if (typeof window.beginWindowMove === 'function') {
-            window.beginWindowMove(mouseEvent);
-          } else if (window.windowUtils) {
-            // Fallback method
-            try {
-              window.windowUtils.beginWindowMove(mouseEvent);
-            } catch (e) {
-              console.warn('[DragFromWebContent] Could not start window drag:', e);
-            }
-          }
-        } catch (e) {
-          console.error('[DragFromWebContent] Error starting drag:', e);
+    try {
+      // Check if element matches interactive selectors
+      if (element.matches && element.matches(INTERACTIVE_SELECTORS)) {
+        return true;
+      }
+
+      // Check computed style cursor
+      const computedStyle = element.ownerDocument.defaultView.getComputedStyle(element);
+      if (computedStyle.cursor === 'pointer') {
+        return true;
+      }
+
+      // Check if contenteditable
+      if (element.isContentEditable) {
+        return true;
+      }
+
+      // Check parent elements (up to 3 levels)
+      let parent = element.parentElement;
+      let depth = 0;
+      while (parent && depth < 3) {
+        if (parent.matches && parent.matches(INTERACTIVE_SELECTORS)) {
+          return true;
         }
+        parent = parent.parentElement;
+        depth++;
+      }
+
+      return false;
+    } catch (e) {
+      console.error('[DragFromWebContent] Error checking interactive element:', e);
+      return false;
+    }
+  }
+
+  function passEventToElement(event, element, overlay) {
+    try {
+      // Temporarily disable overlay pointer events
+      overlay.style.pointerEvents = 'none';
+
+      // Create and dispatch click event to the element
+      const clickEvent = new element.ownerDocument.defaultView.MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        view: element.ownerDocument.defaultView,
+        detail: event.detail,
+        screenX: event.screenX,
+        screenY: event.screenY,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        button: event.button,
+        buttons: event.buttons,
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey
       });
+
+      element.dispatchEvent(clickEvent);
+
+      // Re-enable overlay after a short delay
+      setTimeout(() => {
+        overlay.style.pointerEvents = 'auto';
+      }, 100);
 
     } catch (e) {
-      console.error('[DragFromWebContent] Error injecting content script:', e);
+      console.error('[DragFromWebContent] Error passing event to element:', e);
+      overlay.style.pointerEvents = 'auto';
     }
+  }
+
+  function startDragWithThreshold(event, overlay, threshold) {
+    // Store initial position
+    dragState = {
+      startX: event.screenX,
+      startY: event.screenY,
+      threshold: threshold,
+      overlay: overlay
+    };
+
+    // Add temporary listeners for movement and release
+    overlay.addEventListener('mousemove', handleDragMove, true);
+    overlay.addEventListener('mouseup', handleDragEnd, true);
+    overlay.style.cursor = 'grabbing';
+
+    // Prevent default
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function handleDragMove(event) {
+    if (!dragState) return;
+
+    const deltaX = Math.abs(event.screenX - dragState.startX);
+    const deltaY = Math.abs(event.screenY - dragState.startY);
+    const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+    // Check if movement exceeds threshold
+    if (distance >= dragState.threshold) {
+      console.log('[DragFromWebContent] Threshold exceeded, starting window drag');
+      
+      // Start window drag
+      try {
+        if (typeof window.beginWindowMove === 'function') {
+          window.beginWindowMove(event);
+        } else if (window.windowUtils) {
+          window.windowUtils.beginWindowMove(event);
+        } else {
+          console.warn('[DragFromWebContent] Window drag API not available');
+        }
+      } catch (e) {
+        console.error('[DragFromWebContent] Error starting window drag:', e);
+      }
+
+      // Clean up
+      cleanupDragState();
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function handleDragEnd(event) {
+    console.log('[DragFromWebContent] Mouse released before threshold');
+    cleanupDragState();
+  }
+
+  function cleanupDragState() {
+    if (dragState && dragState.overlay) {
+      dragState.overlay.removeEventListener('mousemove', handleDragMove, true);
+      dragState.overlay.removeEventListener('mouseup', handleDragEnd, true);
+      dragState.overlay.style.cursor = 'grab';
+    }
+    dragState = null;
   }
 
   function cleanup() {
     console.log('[DragFromWebContent] Cleaning up');
     
+    // Remove all overlays
     const browsers = document.querySelectorAll('browser[type="content"]');
     browsers.forEach(browser => {
-      if (browser._zenDragListenersAttached) {
-        browser._zenDragListenersAttached = false;
-      }
+      removeOverlayFromBrowser(browser);
     });
+
+    // Remove preference observer
+    Services.prefs.removeObserver('zen.dragwebcontent.', handlePrefChange);
+
+    // Cleanup any active drag state
+    cleanupDragState();
   }
 
 })();

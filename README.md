@@ -67,44 +67,59 @@ drag-threshold = 3
 
 ### Strategy for Handling Interactive Elements
 
-This mod uses a sophisticated approach to avoid interfering with web page functionality:
+This mod uses a clever overlay + point-check approach to avoid interfering with web page functionality:
 
-#### 1. **Interactive Element Detection**
-Before starting a drag, the mod checks if you're clicking on:
+#### 1. **Transparent Overlay**
+- A transparent div is positioned at the top of each browser tab
+- Height is configurable (default: 60px)
+- Zero visual footprint - completely invisible
+- Captures mousedown events in the draggable zone
+
+#### 2. **Point-Check on Click**
+When you click on the overlay:
+```javascript
+// Get the element underneath the overlay at click position
+const elementUnderneath = document.elementFromPoint(x, y);
+
+// Check if it's interactive
+if (isInteractive(elementUnderneath)) {
+  // Pass the click through to the element
+  dispatchClickEvent(elementUnderneath);
+} else {
+  // Start window drag
+  beginWindowDrag();
+}
+```
+
+#### 3. **Interactive Element Detection**
+Before starting a drag, the mod checks if the element underneath is:
 - Links (`<a>`)
 - Buttons (`<button>`)
 - Form inputs (`<input>`, `<textarea>`, `<select>`)
 - Media elements (`<video>`, `<audio>`, `<canvas>`)
 - Elements with `role` attributes (ARIA)
-- Elements with click handlers
+- Elements with click handlers (`[onclick]`)
 - Contenteditable elements
 - Elements with `cursor: pointer` style
+- Parent elements (up to 3 levels deep)
 
-If any of these are detected, the drag is prevented and the click goes through normally.
+If any of these are detected, the click is passed through to the element.
 
-#### 2. **Drag Threshold**
+#### 4. **Drag Threshold**
 The mod requires you to move your mouse a small distance (default: 5px) before starting the drag. This:
 - Prevents accidental drags when you just want to click
 - Allows clicks on interactive elements to work normally
 - Provides a more intentional drag experience
 
-#### 3. **Parent Element Checking**
-The mod checks up to 3 parent levels to detect if you're clicking inside an interactive container (like a clickable div).
-
-#### 4. **No Visual Overlays**
-Unlike overlay-based approaches, this mod:
-- Uses direct event capture in the content area
-- Has zero visual footprint
-- Doesn't interfere with z-index or pointer-events
-- Works seamlessly with all web content
-
 ### Technical Implementation
 
-1. **Frame Script Injection**: Injects event handlers into each browser tab's content
-2. **Event Capture**: Captures mousedown events at the top of pages
-3. **Smart Filtering**: Checks for interactive elements before processing
-4. **Threshold Tracking**: Monitors mouse movement to determine drag intent
-5. **Chrome-Side Dragging**: Sends message to chrome to initiate window drag
+1. **Overlay Creation**: Creates transparent overlay for each browser tab
+2. **Event Capture**: Overlay captures mousedown events
+3. **Point-Check**: Uses `elementFromPoint()` to check what's underneath
+4. **Smart Filtering**: Checks if underlying element is interactive
+5. **Event Passing**: Re-dispatches events to interactive elements
+6. **Threshold Tracking**: Monitors mouse movement before initiating drag
+7. **Window Drag**: Calls `window.beginWindowMove()` API
 
 ## Compatibility
 
